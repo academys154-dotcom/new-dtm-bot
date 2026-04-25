@@ -51,6 +51,8 @@ BTN_HOME = "🏠 Asosiy menu"
 BTN_ENTER_CODE = "🔑 Kod kiritish"
 BTN_FREE_TEST = "🎁 Bir martalik tekin test"
 BTN_TESTS = "📄 Testlar ro'yxati"
+FULL_MOCK_BONUS_SUBJECT = "__FULL_MOCK_BONUS__"
+FULL_MOCK_BONUS_GRADE = "GLOBAL"
 
 BTN_EXAM_ADD = "➕ Test qo'shish"
 BTN_EXAM_DELETE = "🗑 Testni o'chirish"
@@ -698,6 +700,36 @@ class Database:
             )
             conn.commit()
 
+    def has_used_full_mock_bonus(self, tg_user_id: int) -> bool:
+        return self.has_used_free_demo(tg_user_id, FULL_MOCK_BONUS_GRADE, FULL_MOCK_BONUS_SUBJECT)
+
+    def mark_full_mock_bonus_used(self, tg_user_id: int, exam_id: int) -> None:
+        self.mark_free_demo_used(tg_user_id, exam_id, FULL_MOCK_BONUS_GRADE, FULL_MOCK_BONUS_SUBJECT)
+
+    def get_latest_full_mock_bonus_exam(self, grade_level: str = "UNKNOWN") -> Optional[sqlite3.Row]:
+        with closing(self.connect()) as conn:
+            if grade_level in {"9", "11"}:
+                return conn.execute(
+                    """
+                    SELECT * FROM exams
+                    WHERE is_active = 1
+                      AND is_free_demo = 1
+                      AND (grade_level = ? OR grade_level = 'ALL')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (grade_level,),
+                ).fetchone()
+            return conn.execute(
+                """
+                SELECT * FROM exams
+                WHERE is_active = 1
+                  AND is_free_demo = 1
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+
     def list_user_codes(self, tg_user_id: int) -> list[sqlite3.Row]:
         with closing(self.connect()) as conn:
             return conn.execute(
@@ -948,6 +980,10 @@ def subject_action_keyboard(user_id: int, grade_level: str, subject: str) -> Rep
     return back_keyboard([first_row, [BTN_TESTS]])
 
 
+def full_mock_action_keyboard() -> ReplyKeyboardMarkup:
+    return back_keyboard([[BTN_ENTER_CODE], [BTN_FREE_TEST]])
+
+
 def answer_examples_text(total_questions: int) -> str:
     example_count = min(max(total_questions, 4), 8)
     base_letters = ["A", "B", "C", "D", "A", "C", "B", "D"][:example_count]
@@ -963,15 +999,11 @@ def answer_examples_text(total_questions: int) -> str:
 def school_exam_info_text() -> str:
     return (
         "📘 Botdagi bo'limlar\n\n"
-        "🎯 Full mock — kategoriya va fan bo'yicha tayyorlangan to'liq sinovlar.\n"
+        "🎯 Full mock — faqat kod kiritish va bir martalik bonus mock olish bo'limi.\n"
         "📚 Fanlar — alohida fan bo'yicha testlar, kod orqali test olish va mavjud testlar ro'yxati.\n"
         "✅ Test tekshirish — ishlangan testni kod va javoblar orqali tez tekshirish.\n"
         "👤 Shaxsiy ma'lumotlar — telefoningiz, ishlatgan kodlaringiz va oxirgi natijalaringiz.\n\n"
-        "Full mock kategoriyalari:\n"
-        "• Aniq fanlar: Matematika, Fizika, Ingliz tili\n"
-        "• Tabiiy fanlar: Biologiya, Kimyo, Geografiya\n"
-        "• Ijtimoiy fanlar: Ona tili, Tarix\n\n"
-        "Har bir fan ichida bir martalik tekin test va kod bilan kiriladigan test bo'lishi mumkin. Tekin test har user uchun shu fan bo'yicha faqat 1 marta ochiladi."
+        "Full mock ichida fan tanlanmaydi: user faqat kod kiritadi yoki admin qo'shgan bir martalik bonus mockni oladi. Bonus mock har user uchun faqat 1 marta ochiladi."
     )
 
 
@@ -980,8 +1012,8 @@ def help_text() -> str:
         "🧭 Botdan foydalanish qo'llanmasi",
         "",
         "1) /start bosing va ro'yxatdan o'ting.",
-        "2) Full mock yoki Fanlar bo'limidan fan tanlang.",
-        "3) Bir martalik tekin testni ishlating yoki kod kiriting.",
+        "2) Full mock bo'limida kod kiriting yoki bir martalik bonus mockni oling.",
+        "3) Fanlar bo'limida alohida fanlarni ko'rishingiz mumkin.",
         "4) Testni ishlab bo'lgach ✅ Test tekshirish bo'limiga kiring.",
         "5) Kodni yuboring, so'ng javoblarni yuboring.",
         "6) Natija foiz, baho va tahlil bilan chiqadi.",
@@ -1626,6 +1658,11 @@ async def text_router(message: Message, state: FSMContext) -> None:
 
     if text == BTN_BACK:
         data = await state.get_data()
+        if data.get("full_mock_mode"):
+            await state.clear()
+            await remember_numbered_options(state, main_menu_options(message.from_user.id))
+            await tracked_answer(message, "⬅️ Orqaga qaytildi.\n\n" + main_menu_text(message.from_user.id), reply_markup=main_menu(message.from_user.id))
+            return
         if data.get("selected_subject"):
             await state.update_data(selected_subject="")
             if data.get("from_subjects"):
@@ -1664,8 +1701,13 @@ async def text_router(message: Message, state: FSMContext) -> None:
         return
 
     if text == BTN_FULL_MOCK:
-        await state.update_data(from_subjects=False, selected_subject="", selected_category="", selected_grade=user["target_grade"], numbered_options=list(CATEGORY_SUBJECTS.keys()))
-        await tracked_answer(message, numbered_prompt("🎯 Full mock bo'limi. Kategoriyani tanlang:", list(CATEGORY_SUBJECTS.keys())), reply_markup=categories_keyboard())
+        options = [BTN_ENTER_CODE, BTN_FREE_TEST]
+        await state.update_data(full_mock_mode=True, from_subjects=False, selected_subject="", selected_category="", selected_grade=user["target_grade"], numbered_options=options)
+        await tracked_answer(
+            message,
+            numbered_prompt("🎯 Full mock bo'limi. Quyidagilardan birini tanlang:", options),
+            reply_markup=full_mock_action_keyboard(),
+        )
         return
 
     if text == BTN_SUBJECTS:
@@ -1707,6 +1749,22 @@ async def text_router(message: Message, state: FSMContext) -> None:
 
     if text == BTN_FREE_TEST:
         data = await state.get_data()
+        if data.get("full_mock_mode"):
+            grade = user["target_grade"] if user else "UNKNOWN"
+            if DB.has_used_full_mock_bonus(message.from_user.id):
+                await tracked_answer(message, "Siz bir martalik bonus mockni ishlatib bo'lgansiz.", reply_markup=full_mock_action_keyboard())
+                return
+            exam = DB.get_latest_full_mock_bonus_exam(grade)
+            if not exam:
+                await tracked_answer(message, "Bonus mock hozircha admin tomonidan qo'shilmagan.", reply_markup=full_mock_action_keyboard())
+                return
+            gift_code = normalize_code(f"BONUS-{message.from_user.id}-{exam['id']}")
+            DB.create_code(gift_code, int(exam["id"]), 0)
+            DB.redeem_code(gift_code, message.from_user.id)
+            DB.mark_full_mock_bonus_used(message.from_user.id, int(exam["id"]))
+            await send_exam_document(message, exam, gift_code, reply_markup=full_mock_action_keyboard())
+            return
+
         grade, category, subject = get_subject_context(data)
         if not subject:
             await tracked_answer(message, "Avval fan tanlang.", reply_markup=main_menu(message.from_user.id))
@@ -1727,7 +1785,9 @@ async def text_router(message: Message, state: FSMContext) -> None:
         if not exam:
             await tracked_answer(message, "Bu fan bo'yicha tekin test hozircha yuklanmagan.", reply_markup=subject_action_keyboard(message.from_user.id, grade_for_demo, subject))
             return
-        gift_code = f"FREE-{message.from_user.id}-{exam['id']}"
+        gift_code = normalize_code(f"FREE-{message.from_user.id}-{exam['id']}")
+        DB.create_code(gift_code, int(exam["id"]), 0)
+        DB.redeem_code(gift_code, message.from_user.id)
         DB.mark_free_demo_used(message.from_user.id, exam["id"], grade_for_demo, subject)
         await send_exam_document(message, exam, gift_code, reply_markup=subject_action_keyboard(message.from_user.id, grade_for_demo, subject))
         return
